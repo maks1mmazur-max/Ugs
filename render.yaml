@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ugc-factory
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: WAVESPEED_API_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
