@@ -97,12 +97,14 @@ async function generateImage(prompt, jobId) {
 
 async function generateVideo(imageUrl, prompt, duration, jobId) {
   console.log(`[${jobId}] Step 2: Seedance 2.0...`);
-  const task = await wavespeedPost('/bytedance/seedance-2-0/image-to-video', {
+  // ИСПРАВЛЕНИЕ: seedance-2.0 с точкой, не дефисом!
+  const task = await wavespeedPost('/bytedance/seedance-2.0/image-to-video', {
     prompt,
     image: imageUrl,
     aspect_ratio: '9:16',
     resolution: '720p',
-    duration: parseInt(duration)
+    duration: parseInt(duration),
+    generate_audio: true
   });
   const result = await pollPrediction(task.id, 5000, 120);
   const videoUrl = result.outputs?.[0] || result.output?.video?.[0] || result.output;
