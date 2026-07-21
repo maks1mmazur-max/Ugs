@@ -13,7 +13,9 @@ const execAsync = promisify(exec);
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+
+// Serve static files from public folder
+app.use(express.static(path.join(__dirname, 'public')));
 
 const API_KEY = process.env.WAVESPEED_API_KEY;
 const API_BASE = 'https://api.wavespeed.ai/api/v3';
@@ -26,17 +28,27 @@ const OUTPUT_DIR = path.join(__dirname, 'output');
 
 const jobs = new Map();
 
-// ─── API helpers ───
+// Fallback: serve index.html for root
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// API helpers
 async function wavespeedPost(endpoint, body) {
-  console.log(`[API] POST ${endpoint}`, JSON.stringify(body));
-  const res = await axios.post(`${API_BASE}${endpoint}`, body, {
-    headers: {
-      'Authorization': `Bearer ${API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 30000
-  });
-  return res.data.data ?? res.data;
+  try {
+    const res = await axios.post(`${API_BASE}${endpoint}`, body, {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    });
+    return res.data.data ?? res.data;
+  } catch (err) {
+    const details = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.error(`[WaveSpeed ERROR] ${endpoint}: ${details}`);
+    throw new Error(`WaveSpeed ${endpoint} failed: ${details}`);
+  }
 }
 
 async function wavespeedGetResult(predictionId) {
@@ -66,73 +78,54 @@ async function downloadFile(url, dest) {
   return new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
 }
 
-// ─── Steps ───
 async function generateImage(prompt, jobId) {
   console.log(`[${jobId}] Step 1: GPT Image 2...`);
   const task = await wavespeedPost('/openai/gpt-image-2/text-to-image', {
-    prompt: prompt,
-    aspect_ratio: '9:16'
+    prompt,
+    aspect_ratio: '9:16',
+    resolution: '1k',
+    quality: 'medium'
   });
   const result = await pollPrediction(task.id, 3000, 60);
   const imageUrl = result.outputs?.[0] || result.output?.images?.[0] || result.output;
-  if (!imageUrl || !imageUrl.startsWith('http')) throw new Error('No image URL: ' + JSON.stringify(result));
+  if (!imageUrl || !imageUrl.startsWith('http')) throw new Error('No image URL');
   const imagePath = path.join(TEMP_DIR, `${jobId}_image.png`);
   await downloadFile(imageUrl, imagePath);
-  console.log(`[${jobId}] Image saved: ${imagePath}`);
+  console.log(`[${jobId}] Image: ${imagePath}`);
   return { url: imageUrl, path: imagePath };
 }
 
 async function generateVideo(imageUrl, prompt, duration, jobId) {
   console.log(`[${jobId}] Step 2: Seedance 2.0...`);
-  
-  // Try with image_url first
-  let body = {
-    prompt: prompt,
-    image_url: imageUrl,
+  const task = await wavespeedPost('/bytedance/seedance-2-0/image-to-video', {
+    prompt,
+    image: imageUrl,
     aspect_ratio: '9:16',
+    resolution: '720p',
     duration: parseInt(duration)
-  };
-  
-  let task;
-  try {
-    task = await wavespeedPost('/bytedance/seedance-2-0/image-to-video', body);
-  } catch (err) {
-    // If 400, try with "image" instead of "image_url"
-    if (err.response?.status === 400) {
-      console.log(`[${jobId}] Retrying with "image" parameter...`);
-      body = {
-        prompt: prompt,
-        image: imageUrl,
-        aspect_ratio: '9:16',
-        duration: parseInt(duration)
-      };
-      task = await wavespeedPost('/bytedance/seedance-2-0/image-to-video', body);
-    } else {
-      throw err;
-    }
-  }
-  
+  });
   const result = await pollPrediction(task.id, 5000, 120);
   const videoUrl = result.outputs?.[0] || result.output?.video?.[0] || result.output;
-  if (!videoUrl || !videoUrl.startsWith('http')) throw new Error('No video URL: ' + JSON.stringify(result));
+  if (!videoUrl || !videoUrl.startsWith('http')) throw new Error('No video URL');
   const videoPath = path.join(TEMP_DIR, `${jobId}_video.mp4`);
   await downloadFile(videoUrl, videoPath);
-  console.log(`[${jobId}] Video saved: ${videoPath}`);
+  console.log(`[${jobId}] Video: ${videoPath}`);
   return { url: videoUrl, path: videoPath };
 }
 
 async function generateVoice(text, jobId) {
   console.log(`[${jobId}] Step 3: OmniVoice TTS...`);
   const task = await wavespeedPost('/wavespeed-ai/omnivoice/text-to-speech', {
-    text: text,
-    speed: 1.0
+    text,
+    speed: 1.0,
+    voice_description: 'male, young adult, confident, deep voice'
   });
   const result = await pollPrediction(task.id, 2000, 60);
   const audioUrl = result.outputs?.[0] || result.output;
-  if (!audioUrl || !audioUrl.startsWith('http')) throw new Error('No audio URL: ' + JSON.stringify(result));
+  if (!audioUrl || !audioUrl.startsWith('http')) throw new Error('No audio URL');
   const audioPath = path.join(TEMP_DIR, `${jobId}_voice.mp3`);
   await downloadFile(audioUrl, audioPath);
-  console.log(`[${jobId}] Voice saved: ${audioPath}`);
+  console.log(`[${jobId}] Voice: ${audioPath}`);
   return { url: audioUrl, path: audioPath };
 }
 
@@ -144,7 +137,6 @@ async function mergeVideoAudio(videoPath, audioPath, outputPath, jobId) {
   return outputPath;
 }
 
-// ─── Pipeline ───
 async function runPipeline(jobId, { prompt, voiceText, duration }) {
   const job = jobs.get(jobId);
   try {
@@ -171,12 +163,11 @@ async function runPipeline(jobId, { prompt, voiceText, duration }) {
     }, 120000);
 
   } catch (err) {
-    console.error(`[${jobId}] Pipeline error:`, err.message);
+    console.error(`[${jobId}] Error:`, err.message);
     job.status = 'failed'; job.error = err.message; job.step = 'error';
   }
 }
 
-// ─── Routes ───
 app.post('/api/generate', async (req, res) => {
   const { prompt, voiceText, duration = 5 } = req.body;
   if (!prompt || !voiceText) return res.status(400).json({ error: 'prompt and voiceText required' });
@@ -198,8 +189,6 @@ app.get('/output/:filename', (req, res) => {
   if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
   res.sendFile(filePath);
 });
-
-app.get('/api/status/ping', (req, res) => res.json({ status: 'ok', time: Date.now() }));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
