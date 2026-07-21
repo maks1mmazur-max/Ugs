@@ -28,6 +28,7 @@ const jobs = new Map();
 
 // ─── API helpers ───
 async function wavespeedPost(endpoint, body) {
+  console.log(`[API] POST ${endpoint}`, JSON.stringify(body));
   const res = await axios.post(`${API_BASE}${endpoint}`, body, {
     headers: {
       'Authorization': `Bearer ${API_KEY}`,
@@ -69,43 +70,69 @@ async function downloadFile(url, dest) {
 async function generateImage(prompt, jobId) {
   console.log(`[${jobId}] Step 1: GPT Image 2...`);
   const task = await wavespeedPost('/openai/gpt-image-2/text-to-image', {
-    prompt, aspect_ratio: '9:16', num_outputs: 1
+    prompt: prompt,
+    aspect_ratio: '9:16'
   });
   const result = await pollPrediction(task.id, 3000, 60);
   const imageUrl = result.outputs?.[0] || result.output?.images?.[0] || result.output;
-  if (!imageUrl || !imageUrl.startsWith('http')) throw new Error('No image URL');
+  if (!imageUrl || !imageUrl.startsWith('http')) throw new Error('No image URL: ' + JSON.stringify(result));
   const imagePath = path.join(TEMP_DIR, `${jobId}_image.png`);
   await downloadFile(imageUrl, imagePath);
-  console.log(`[${jobId}] Image: ${imagePath}`);
+  console.log(`[${jobId}] Image saved: ${imagePath}`);
   return { url: imageUrl, path: imagePath };
 }
 
 async function generateVideo(imageUrl, prompt, duration, jobId) {
   console.log(`[${jobId}] Step 2: Seedance 2.0...`);
-  const task = await wavespeedPost('/bytedance/seedance-2-0/image-to-video', {
-    prompt, image: imageUrl, aspect_ratio: '9:16', resolution: '720p',
-    duration: parseInt(duration), num_outputs: 1
-  });
+  
+  // Try with image_url first
+  let body = {
+    prompt: prompt,
+    image_url: imageUrl,
+    aspect_ratio: '9:16',
+    duration: parseInt(duration)
+  };
+  
+  let task;
+  try {
+    task = await wavespeedPost('/bytedance/seedance-2-0/image-to-video', body);
+  } catch (err) {
+    // If 400, try with "image" instead of "image_url"
+    if (err.response?.status === 400) {
+      console.log(`[${jobId}] Retrying with "image" parameter...`);
+      body = {
+        prompt: prompt,
+        image: imageUrl,
+        aspect_ratio: '9:16',
+        duration: parseInt(duration)
+      };
+      task = await wavespeedPost('/bytedance/seedance-2-0/image-to-video', body);
+    } else {
+      throw err;
+    }
+  }
+  
   const result = await pollPrediction(task.id, 5000, 120);
   const videoUrl = result.outputs?.[0] || result.output?.video?.[0] || result.output;
-  if (!videoUrl || !videoUrl.startsWith('http')) throw new Error('No video URL');
+  if (!videoUrl || !videoUrl.startsWith('http')) throw new Error('No video URL: ' + JSON.stringify(result));
   const videoPath = path.join(TEMP_DIR, `${jobId}_video.mp4`);
   await downloadFile(videoUrl, videoPath);
-  console.log(`[${jobId}] Video: ${videoPath}`);
+  console.log(`[${jobId}] Video saved: ${videoPath}`);
   return { url: videoUrl, path: videoPath };
 }
 
 async function generateVoice(text, jobId) {
   console.log(`[${jobId}] Step 3: OmniVoice TTS...`);
   const task = await wavespeedPost('/wavespeed-ai/omnivoice/text-to-speech', {
-    text, speed: 1.0, voice_description: 'male, young adult, confident, deep voice'
+    text: text,
+    speed: 1.0
   });
   const result = await pollPrediction(task.id, 2000, 60);
   const audioUrl = result.outputs?.[0] || result.output;
-  if (!audioUrl || !audioUrl.startsWith('http')) throw new Error('No audio URL');
+  if (!audioUrl || !audioUrl.startsWith('http')) throw new Error('No audio URL: ' + JSON.stringify(result));
   const audioPath = path.join(TEMP_DIR, `${jobId}_voice.mp3`);
   await downloadFile(audioUrl, audioPath);
-  console.log(`[${jobId}] Voice: ${audioPath}`);
+  console.log(`[${jobId}] Voice saved: ${audioPath}`);
   return { url: audioUrl, path: audioPath };
 }
 
@@ -139,13 +166,12 @@ async function runPipeline(jobId, { prompt, voiceText, duration }) {
     job.progress = 100; job.step = 'done'; job.status = 'completed';
     job.resultUrl = `/output/${jobId}_final.mp4`;
 
-    // Cleanup after 2 min
     setTimeout(() => {
       try { fs.unlinkSync(image.path); fs.unlinkSync(video.path); fs.unlinkSync(voice.path); } catch(e) {}
     }, 120000);
 
   } catch (err) {
-    console.error(`[${jobId}] Error:`, err.message);
+    console.error(`[${jobId}] Pipeline error:`, err.message);
     job.status = 'failed'; job.error = err.message; job.step = 'error';
   }
 }
@@ -172,6 +198,8 @@ app.get('/output/:filename', (req, res) => {
   if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
   res.sendFile(filePath);
 });
+
+app.get('/api/status/ping', (req, res) => res.json({ status: 'ok', time: Date.now() }));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
