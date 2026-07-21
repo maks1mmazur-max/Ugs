@@ -97,7 +97,6 @@ async function generateImage(prompt, jobId) {
 
 async function generateVideo(imageUrl, prompt, duration, jobId) {
   console.log(`[${jobId}] Step 2: Seedance 2.0...`);
-  // ИСПРАВЛЕНИЕ: seedance-2.0 с точкой, не дефисом!
   const task = await wavespeedPost('/bytedance/seedance-2.0/image-to-video', {
     prompt,
     image: imageUrl,
@@ -117,10 +116,11 @@ async function generateVideo(imageUrl, prompt, duration, jobId) {
 
 async function generateVoice(text, jobId) {
   console.log(`[${jobId}] Step 3: OmniVoice TTS...`);
+  // ИСПРАВЛЕНИЕ: только допустимые дескрипторы через запятую + пробел
   const task = await wavespeedPost('/wavespeed-ai/omnivoice/text-to-speech', {
     text,
     speed: 1.0,
-    voice_description: 'male, young adult, confident, deep voice'
+    voice_description: 'male, young adult, low pitch'
   });
   const result = await pollPrediction(task.id, 2000, 60);
   const audioUrl = result.outputs?.[0] || result.output;
